@@ -159,13 +159,14 @@ def main() -> None:
     report_path = generate_report(results, run_label=args.label)
 
     # ── Final summary ─────────────────────────────────────────────────────────
-    passed = sum(1 for r in results if r.evaluation.verdict == "PASS")
-    warned = sum(1 for r in results if r.evaluation.verdict == "WARN")
-    failed = sum(1 for r in results if r.evaluation.verdict == "FAIL")
-    total  = len(results)
+    passed     = sum(1 for r in results if r.evaluation.verdict == "PASS")
+    warned     = sum(1 for r in results if r.evaluation.verdict == "WARN")
+    failed     = sum(1 for r in results if r.evaluation.verdict == "FAIL")
+    api_errors = sum(1 for r in results if r.evaluation.verdict == "API_ERROR")
+    total      = len(results)
 
     logger.info("=" * 60)
-    logger.info("RESULTS:  ✅ %d PASS  |  ⚠️  %d WARN  |  ❌ %d FAIL  (total: %d)", passed, warned, failed, total)
+    logger.info("RESULTS:  ✅ %d PASS  |  ⚠️  %d WARN  |  ❌ %d FAIL  |  🔌 %d API ERROR  (total: %d)", passed, warned, failed, api_errors, total)
     logger.info("REPORT:   %s", report_path)
     logger.info("=" * 60)
 

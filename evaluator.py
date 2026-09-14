@@ -21,13 +21,13 @@ from typing import Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
-from config import EVALUATOR_MODEL, OPENAI_API_KEY
+from config import CANCELLATION_WINDOW_HOURS, EVALUATOR_MODEL, OPENAI_API_KEY, RESCHEDULING_WINDOW_HOURS
 from runner import ConversationResult
 from test_cases.cases import TestCase
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = """\
+_SYSTEM_PROMPT = f"""\
 You are a strict quality evaluator for a dental clinic AI chat agent.
 You will be given:
   1. A test case description and its expected behaviours checklist
@@ -44,13 +44,20 @@ CRITICAL RULES FOR EVALUATION:
    additional criteria, do NOT penalise for things not in the checklist, and do NOT
    add your own expectations about timing or phrasing of steps.
 
-2. SILENT VERIFICATION
+2. SILENT VERIFICATION AND NEXT_STEPS TOOL CALLS
    The agent verifies patient identity (phone number and date of birth) silently via
    internal tool calls that are NOT visible in the transcript. You will NOT see the
    verification happening. Assume verification succeeded if the agent continues the
    conversation normally. Assume verification failed only if the agent explicitly says
    something like "I could not find your record" or "that information does not match".
    Do NOT penalise the agent for not visibly confirming verification steps.
+   ADDITIONALLY: In follow-up conversations the agent may have a NEXT_STEPS instruction
+   in its continuity memory telling it to immediately fire a tool call (e.g.
+   fetch_patient_details) before generating any visible reply. In this case the
+   agent's FIRST visible message may already reflect the tool result — it may skip
+   asking for details it already retrieved silently. This is CORRECT behaviour.
+   Do NOT penalise the agent for not re-asking for information it already has from
+   the continuity memory NEXT_STEPS tool call.
 
 3. IDENTITY COLLECTION
    The agent will ask for BOTH phone number AND date of birth for identity verification.
@@ -70,8 +77,8 @@ CRITICAL RULES FOR EVALUATION:
    not making a separate explicit confirmation statement after this.
 
 6. RESCHEDULING / CANCELLATION WITHIN TIME WINDOW
-   The clinic has a 48-hour rescheduling window and a 24-hour cancellation window.
-   If a patient requests rescheduling within 48 hours or cancellation within 24 hours,
+   The clinic has a {RESCHEDULING_WINDOW_HOURS}-hour rescheduling window and a {CANCELLATION_WINDOW_HOURS}-hour cancellation window.
+   If a patient requests rescheduling within {RESCHEDULING_WINDOW_HOURS} hours or cancellation within {CANCELLATION_WINDOW_HOURS} hours,
    the CORRECT agent behaviour is to inform the patient this is a last-minute request
    and refer it to another team, offering to create a note. This IS correct behaviour.
    Do NOT penalise the agent for not directly rescheduling/cancelling in these cases.
@@ -173,13 +180,13 @@ Focus on:
 Do NOT penalise the agent for wording or tone — only evaluate flow and correctness.
 
 Return your evaluation as a JSON object with exactly these keys:
-{
+{{
   "verdict": "PASS" | "WARN" | "FAIL",
   "score": <integer 0-100>,
   "summary": "<2-3 sentence summary of what happened in the conversation>",
   "findings": ["<finding 1>", "<finding 2>", ...],
   "failed_behaviors": ["<behaviour that was missed or wrong>"]
-}
+}}
 
 Rules:
 - verdict PASS if all expected behaviours were observed (score >= 85)
@@ -215,9 +222,9 @@ class Evaluator:
         # Infrastructure failure — conversation was cut short by API error, not agent error
         if result.infra_error:
             return EvaluationResult(
-                verdict="WARN",
-                score=50,
-                summary="Test ended due to an infrastructure failure (API timeout or connection error). Agent behaviour could not be fully evaluated.",
+                verdict="API_ERROR",
+                score=0,
+                summary="Test ended due to an infrastructure failure (API timeout or connection error). Agent behaviour could not be evaluated.",
                 findings=[f"Infrastructure error: {result.error}", "The agent's flow was cut short externally — this is not an agent failure."],
                 failed_behaviors=[],
                 error=result.error,

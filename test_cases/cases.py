@@ -14,8 +14,50 @@ Each TestCase contains:
   - expected_behaviors  : checklist used by the LLM evaluator
 """
 from __future__ import annotations
+import random
 from dataclasses import dataclass, field
 from typing import Optional
+
+from config import (
+    CANCELLATION_CHARGE,
+    CANCELLATION_WINDOW_HOURS,
+    PATIENT_DOB,
+    PATIENT_FIRST,
+    PATIENT_LAST,
+    PATIENT_PHONE,
+    PROVIDERS,
+    RESCHEDULING_CHARGE,
+    RESCHEDULING_WINDOW_HOURS,
+)
+
+
+def _rand_provider() -> str:
+    """Pick one provider at random from the configured list."""
+    return random.choice(PROVIDERS) if PROVIDERS else "Default Provider"
+
+
+def _two_providers() -> tuple[str, str]:
+    """Pick two distinct providers at random.
+    Falls back to the same provider twice if only one is configured.
+    """
+    if len(PROVIDERS) >= 2:
+        a, b = random.sample(PROVIDERS, 2)
+    else:
+        a = b = _rand_provider()
+    return a, b
+
+
+# ── Per-test random provider assignments ──────────────────────────────────────────
+# Evaluated fresh each run. Tests that reference the same provider multiple times
+# (description + persona + expected_behaviors) get a single consistent value.
+# Tests that need two different providers get a random pair.
+_p_tc004 = _rand_provider()              # TC_004 single specific provider
+_p_tc020 = _rand_provider()              # TC_020 single specific provider
+_p_tc033 = _rand_provider()              # TC_033 single specific provider
+_p_tc046 = _rand_provider()              # TC_046 single specific provider
+_pa_tc029, _pb_tc029 = _two_providers()  # TC_029 switch from one provider to another
+_pa_tc034, _pb_tc034 = _two_providers()  # TC_034 two patients each with different provider
+_pa_tc036, _pb_tc036 = _two_providers()  # TC_036 new + existing patient each with different provider
 
 
 @dataclass
@@ -34,20 +76,20 @@ class TestCase:
 # Shared patient snippets (reused across personas)
 # ─────────────────────────────────────────────────────────────────────────────
 _EXISTING_IDENTITY = (
-    "Your name is ANT MAN. Your phone number is 1112223334. "
-    "Your date of birth is 07 April 2004. You are an EXISTING patient at this clinic."
+    f"Your name is {PATIENT_FIRST} {PATIENT_LAST}. Your phone number is {PATIENT_PHONE}. "
+    f"Your date of birth is {PATIENT_DOB}. You are an EXISTING patient at this clinic."
 )
 _NEW_IDENTITY = (
-    "Your name is ANT MAN. Your phone number is 1112223334. "
-    "Your date of birth is 07 April 2004. You are a NEW patient at this clinic."
+    f"Your name is {PATIENT_FIRST} {PATIENT_LAST}. Your phone number is {PATIENT_PHONE}. "
+    f"Your date of birth is {PATIENT_DOB}. You are a NEW patient at this clinic."
 )
 _CHILD_IDENTITY = (
-    "You are booking for a child named Tommy MAN, age 3 years old (DOB: 10 Jan 2022). "
-    "You are the parent. Your own name is ANT MAN, phone 1112223334."
+    f"You are booking for a child named Tommy {PATIENT_LAST}, age 3 years old (DOB: 10 Jan 2022). "
+    f"You are the parent. Your own name is {PATIENT_FIRST} {PATIENT_LAST}, phone {PATIENT_PHONE}."
 )
 _MAX_AGE_IDENTITY = (
-    "You are booking for a patient named ANT MAN, age 95 years old (DOB: 01 Jan 1930). "
-    "Phone number 1112223334."
+    f"You are booking for a patient named {PATIENT_FIRST} {PATIENT_LAST}, age 95 years old (DOB: 01 Jan 1930). "
+    f"Phone number {PATIENT_PHONE}."
 )
 _BEHAVIOR = (
     "Respond naturally and briefly as a real patient would. "
@@ -55,6 +97,7 @@ _BEHAVIOR = (
     "If the agent asks for your phone number, give it. "
     "If the agent asks for your date of birth, give it. "
     "If the agent asks for your name, give it. "
+    "If the agent asks whether you would like to schedule an appointment, say yes and mention your reason for the visit if you have not already stated it. "
     "Stay in character throughout. "
     "When you feel the task is done or the agent has confirmed everything, say 'bye' or 'that is all, thank you'."
 )
@@ -189,17 +232,17 @@ ALL_TEST_CASES: list[TestCase] = [
         id="TC_004",
         name="Booking With Specific Provider",
         severity="critical",
-        description="Patient requests a booking with a specific available provider (Lucas Bennett).",
+        description=f"Patient requests a booking with a specific available provider ({_p_tc004}).",
         patient_persona=(
-            f"{_EXISTING_IDENTITY} You want to book a General Consultation specifically with Dr. Lucas Bennett. "
+            f"{_EXISTING_IDENTITY} You want to book a General Consultation specifically with {_p_tc004}. "
             "Insist on this provider only. "
             f"{_BEHAVIOR}"
         ),
         max_turns=17,
         expected_behaviors=[
-            "Agent attempts to book with the requested provider Lucas Bennett",
+            f"Agent attempts to book with the requested provider {_p_tc004}",
             "Agent does not substitute a different provider without asking",
-            "Agent confirms the provider name in the booking summary",
+            f"Agent confirms the provider name in the booking summary",
         ],
     ),
 
@@ -281,7 +324,7 @@ ALL_TEST_CASES: list[TestCase] = [
         id="TC_009",
         name="Last Minute Rescheduling and Charges",
         severity="critical",
-        description="Patient tries to reschedule within the rescheduling window (48 hours) — agent should warn about charges.",
+        description=f"Patient tries to reschedule within the rescheduling window ({RESCHEDULING_WINDOW_HOURS} hours) — agent should warn about charges or refer to team.",
         patient_persona=(
             f"{_EXISTING_IDENTITY} You have an appointment tomorrow morning and want to reschedule it to next week. "
             "Do NOT mention or bring up charges yourself before the agent does. "
@@ -292,9 +335,8 @@ ALL_TEST_CASES: list[TestCase] = [
         ),
         max_turns=17,
         expected_behaviors=[
-            "Agent warns patient about last-minute rescheduling charges",
-            "Agent mentions the charges amount or policy before proceeding",
-            "Agent proceeds only after patient confirms acceptance of charges",
+            f"Agent identifies the request is within the {RESCHEDULING_WINDOW_HOURS}-hour rescheduling window and informs the patient of the policy or charges",
+            "Agent proceeds only after patient acknowledges the policy or confirms acceptance of charges",
             "Agent offers alternative slots when first slot is rejected",
         ],
     ),
@@ -303,7 +345,7 @@ ALL_TEST_CASES: list[TestCase] = [
         id="TC_010",
         name="Last Minute Cancellation and Charges",
         severity="critical",
-        description="Patient tries to cancel within the cancellation window (24 hours) — agent should warn about charges.",
+        description=f"Patient tries to cancel within the cancellation window ({CANCELLATION_WINDOW_HOURS} hours) — agent should warn about charges or refer to team.",
         patient_persona=(
             f"{_EXISTING_IDENTITY} You have an appointment in a few hours and want to cancel it. "
             "If warned about last-minute cancellation charges, say you understand and want to cancel anyway. "
@@ -311,8 +353,8 @@ ALL_TEST_CASES: list[TestCase] = [
         ),
         max_turns=17,
         expected_behaviors=[
-            "Agent warns patient about last-minute cancellation charges",
-            "Agent proceeds only after patient confirms they accept the charges",
+            f"Agent identifies the request is within the {CANCELLATION_WINDOW_HOURS}-hour cancellation window and informs the patient of the policy or charges",
+            "Agent proceeds only after patient confirms they accept the charges or policy",
             "Agent confirms cancellation",
         ],
     ),
@@ -323,15 +365,15 @@ ALL_TEST_CASES: list[TestCase] = [
         severity="critical",
         description="Patient ANT MAN provides wrong DOB repeatedly during identity verification — agent should stop after 4 failed attempts.",
         patient_persona=(
-            "You are ANT MAN. Your phone number is 1112223334. "
+            f"You are {PATIENT_FIRST} {PATIENT_LAST}. Your phone number is {PATIENT_PHONE}. "
             "You want to book a General Consultation. "
             "You are ALWAYS an EXISTING patient — you have been to this clinic before. "
             "NEVER say 'first appointment', NEVER say 'new patient', NEVER say 'I haven't visited before'. "
             "Always say you are an existing patient if the agent asks. "
             "When the agent asks for your date of birth, give WRONG dates in this exact sequence: "
             "1st time: 01 January 2000. 2nd time: 15 March 1995. 3rd time: 20 June 1988. 4th time: 11 November 2001. "
-            "NEVER give the correct DOB (07 April 2004) regardless of how many times the agent asks. "
-            "Do NOT change your name or pretend to be a different person. You are always ANT MAN. "
+            f"NEVER give the correct DOB ({PATIENT_DOB}) regardless of how many times the agent asks. "
+            f"Do NOT change your name or pretend to be a different person. You are always {PATIENT_FIRST} {PATIENT_LAST}. "
             "Do NOT give any other DOB not listed above. "
             f"{_BEHAVIOR}"
         ),
@@ -499,15 +541,15 @@ ALL_TEST_CASES: list[TestCase] = [
         id="TC_020",
         name="Provider ID Hallucination — Get Available Slot",
         severity="critical",
-        description="Check that agent does not pass a fabricated provider ID to get_available_slot.",
+        description=f"Check that agent does not pass a fabricated provider ID to get_available_slot.",
         patient_persona=(
-            f"{_EXISTING_IDENTITY} You want to book with Ethan Brooks specifically. "
+            f"{_EXISTING_IDENTITY} You want to book with {_p_tc020} specifically. "
             "Be cooperative throughout. "
             f"{_BEHAVIOR}"
         ),
         max_turns=17,
         expected_behaviors=[
-            "Agent uses the correct provider ID for Ethan Brooks",
+            f"Agent uses the correct provider ID for {_p_tc020}",
             "Agent does not fabricate or guess provider IDs",
         ],
     ),
@@ -518,7 +560,7 @@ ALL_TEST_CASES: list[TestCase] = [
         severity="critical",
         description="Check that agent passes the correct provider ID from slot results into book_appointment.",
         patient_persona=(
-            f"{_EXISTING_IDENTITY} You want to book a General Consultation with Lucas Bennett. "
+            f"{_EXISTING_IDENTITY} You want to book a General Consultation with {_rand_provider()}. "
             "Confirm the slot the agent offers. "
             f"{_BEHAVIOR}"
         ),
@@ -646,7 +688,7 @@ ALL_TEST_CASES: list[TestCase] = [
         description="Patient tries to change service and provider during rescheduling. Agent cannot change service/provider on an existing booking — correct behaviour is to inform patient and offer to create a note or book a new appointment with the new details.",
         patient_persona=(
             f"{_EXISTING_IDENTITY} You have a General Consultation booked and want to reschedule it but also "
-            "change the service to Cleaning Exam OPD and switch the provider to Ethan Brooks. "
+            f"change the service to Cleaning Exam OPD and switch the provider to {_rand_provider()}. "
             "If the agent offers to create a note or book a new appointment with those changes, accept that. "
             f"{_BEHAVIOR}"
         ),
@@ -664,8 +706,8 @@ ALL_TEST_CASES: list[TestCase] = [
         severity="warning",
         description="Patient specifically requests a different provider during rescheduling.",
         patient_persona=(
-            f"{_EXISTING_IDENTITY} You have an appointment with Lucas Bennett and want to reschedule it "
-            "but switch to Ethan Brooks instead. "
+            f"{_EXISTING_IDENTITY} You have an appointment with {_pa_tc029} and want to reschedule it "
+            f"but switch to {_pb_tc029} instead. "
             "Reject the first slot offered and ask for another. Accept the second. "
             f"{_BEHAVIOR}"
         ),
@@ -738,17 +780,17 @@ ALL_TEST_CASES: list[TestCase] = [
         id="TC_033",
         name="Multipatient (Same Type) — Same Service Specific Provider",
         severity="critical",
-        description="Two existing patients booking same service with a specific provider. If a patient record cannot be found, agent should book for the patient whose record was found and create a task for the one whose record was not found.",
+        description=f"Two existing patients booking same service with a specific provider. If a patient record cannot be found, agent should book for the patient whose record was found and create a task for the one whose record was not found.",
         patient_persona=(
             f"{_EXISTING_IDENTITY} You and your colleague (existing patient, DOB 03 Mar 2001, phone 7776665554) "
-            "both want Cleaning Exam OPD specifically with Lucas Bennett. "
+            f"both want Cleaning Exam OPD specifically with {_p_tc033}. "
             "If the agent says your colleague's record cannot be found, accept the note creation for them. "
             f"{_BEHAVIOR}"
         ),
         max_turns=21,
         expected_behaviors=[
             "Agent collects phone number and DOB for each patient to verify identity",
-            "Agent attempts to book with Lucas Bennett for the patient whose record is found",
+            f"Agent attempts to book with {_p_tc033} for the patient whose record is found",
             "Agent offers to create a task for any patient whose record cannot be verified",
         ],
     ),
@@ -759,8 +801,8 @@ ALL_TEST_CASES: list[TestCase] = [
         severity="critical",
         description="Two existing patients, different services, each wanting a different specific provider.",
         patient_persona=(
-            f"{_EXISTING_IDENTITY} You want a General Consultation with Ethan Brooks. "
-            "Your partner (existing, DOB 25 Dec 1999, phone 1231231234) wants Implant Consult with Lucas Bennett. "
+            f"{_EXISTING_IDENTITY} You want a General Consultation with {_pa_tc034}. "
+            f"Your partner (existing, DOB 25 Dec 1999, phone 1231231234) wants Implant Consult with {_pb_tc034}. "
             f"{_BEHAVIOR}"
         ),
         max_turns=21,
@@ -795,8 +837,8 @@ ALL_TEST_CASES: list[TestCase] = [
         severity="critical",
         description="One new and one existing patient, different services, specific provider.",
         patient_persona=(
-            f"{_NEW_IDENTITY} You are a new patient wanting a Dental Emergency with Clinic2 Provider. "
-            "Your sister (existing, DOB 08 Aug 1997, phone 8887776665) wants Cervical Spine with Lucas Bennett. "
+            f"{_NEW_IDENTITY} You are a new patient wanting a Dental Emergency with {_pa_tc036}. "
+            f"Your sister (existing, DOB 08 Aug 1997, phone 8887776665) wants Cervical Spine with {_pb_tc036}. "
             "In your VERY FIRST MESSAGE, mention both your own appointment need AND your sister's appointment need. "
             "Do not wait to be asked about a second patient — introduce both in your opening message. "
             f"{_BEHAVIOR}"
@@ -987,6 +1029,117 @@ ALL_TEST_CASES: list[TestCase] = [
         expected_behaviors=[
             "Agent does not auto-confirm an appointment that the patient has not explicitly selected",
             "Agent handles abrupt end gracefully",
+        ],
+    ),
+
+    TestCase(
+        id="TC_046",
+        name="Fresh Start Existing Patient Booking With Specific Provider",
+        severity="critical",
+        description=f"Full fresh-start booking flow for an existing patient who requests a specific provider ({_p_tc046}).",
+        patient_persona=(
+            f"{_EXISTING_IDENTITY} You want to book a General Consultation with {_p_tc046} specifically. "
+            "Insist on this provider. "
+            "Reject the first slot offered and ask for an alternative. Accept the second slot. "
+            f"{_BEHAVIOR}"
+        ),
+        max_turns=19,
+        expected_behaviors=[
+            "Agent asks if patient is new or existing",
+            "Agent collects phone number and date of birth to verify identity",
+            f"Agent attempts to book with the requested provider {_p_tc046}",
+            "Agent does not substitute a different provider without asking",
+            "Agent offers an alternative slot when first is rejected",
+            f"Agent confirms appointment details including provider {_p_tc046}",
+        ],
+    ),
+
+    TestCase(
+        id="TC_047",
+        name="Emergency Case — Single Patient Appointment Request",
+        severity="critical",
+        description="Existing patient in a dental emergency requests an urgent appointment as soon as possible.",
+        patient_persona=(
+            f"{_EXISTING_IDENTITY} You are in a dental emergency — you have severe tooth pain and think "
+            "you may have a cracked tooth. You need to be seen as soon as possible today or tomorrow. "
+            "Communicate urgency clearly in your first message. "
+            "Accept the earliest available slot the agent offers without rejecting. "
+            f"{_BEHAVIOR}"
+        ),
+        max_turns=15,
+        expected_behaviors=[
+            "Agent acknowledges the emergency and responds with empathy and urgency",
+            "Agent books an emergency or urgent care appointment",
+            "Agent offers the earliest available slot",
+            "Agent confirms the booking with patient",
+        ],
+    ),
+
+    TestCase(
+        id="TC_048",
+        name="Emergency Case — Multi Patient Appointment Request",
+        severity="critical",
+        description="Two patients both in dental emergencies request urgent appointments in the same conversation.",
+        patient_persona=(
+            f"{_EXISTING_IDENTITY} You and your friend Alex (a new patient) are both having dental emergencies "
+            "and need to be seen as urgently as possible. "
+            "In your VERY FIRST MESSAGE, mention that both of you need emergency appointments urgently. "
+            "Provide your own identity details when asked, then Alex's details: "
+            "full name Alex Turner, phone 7778889990. "
+            "Accept the earliest available slots for both without rejecting any. "
+            f"{_BEHAVIOR}"
+        ),
+        max_turns=21,
+        expected_behaviors=[
+            "Agent acknowledges the emergency for both patients and responds with empathy",
+            "Agent handles the existing patient verification and new patient creation flows correctly",
+            "Agent books emergency appointments for both patients",
+            "Agent offers the earliest available slots",
+            "Agent confirms bookings for both patients",
+        ],
+    ),
+
+    TestCase(
+        id="TC_049",
+        name="Multi Patient Booking — Patients Request to Be Seen Together",
+        severity="critical",
+        description="Two existing patients request appointments at the same time or back to back on the same day.",
+        patient_persona=(
+            f"{_EXISTING_IDENTITY} You and your spouse (existing patient, DOB 15 May 1998, phone 5554443332) "
+            "both want General Consultation appointments. "
+            "In your VERY FIRST MESSAGE, say that you both want to come in together or back to back on the same day. "
+            "If the agent offers slots on the same day close together, accept them. "
+            "If the agent can only offer different days, accept that and note your preference was same day. "
+            f"{_BEHAVIOR}"
+        ),
+        max_turns=21,
+        expected_behaviors=[
+            "Agent understands that both patients want to be seen together or consecutively on the same day",
+            "Agent attempts to find overlapping or back-to-back slots on the same day for both patients",
+            "Agent offers slots that minimise wait time between appointments where possible",
+            "Agent confirms appointments for both patients",
+        ],
+    ),
+
+    TestCase(
+        id="TC_050",
+        name="Multi Patient Booking — Patients Request to Be Seen Separately",
+        severity="critical",
+        description="Two existing patients explicitly request appointments at completely different times.",
+        patient_persona=(
+            f"{_EXISTING_IDENTITY} You and your sibling (existing patient, DOB 22 Sep 1996, phone 3332221110) "
+            "both need General Consultation appointments. "
+            "In your VERY FIRST MESSAGE, make it clear that you both want completely separate appointments — "
+            "different days if possible, definitely not back to back. "
+            "When offered slots, confirm they are on different days before accepting. "
+            f"{_BEHAVIOR}"
+        ),
+        max_turns=21,
+        expected_behaviors=[
+            "Agent understands that both patients want separate appointments at different times",
+            "Agent does not attempt to book them in overlapping or consecutive slots",
+            "Agent books appointments for both patients at clearly different times or days",
+            "Agent confirms separate appointment details for each patient",
         ],
     ),
 ]

@@ -25,12 +25,14 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from config import (
-    AGENT_ID,
     API_HEADERS,
+    CONVERSATION_ID,
     EMPTY_REPLY_RETRIES,
     EMPTY_REPLY_WAIT,
     FORWARD_API_URL,
+    LOCATION_ID,
     OPENAI_API_KEY,
+    ORGANIZATION_ID,
     PATIENT_MODEL,
     REQUEST_TIMEOUT,
     TURN_DELAY_SECONDS,
@@ -45,24 +47,6 @@ _END_SIGNALS = {
     "thank you, bye", "thanks, bye", "that's it", "that is it",
 }
 
-# Phrases that signal the agent has closed the conversation.
-# If any of these appear in the agent's reply the Retell chat is already
-# marked ended -- sending another message causes HTTP 400 "Chat already ended".
-_AGENT_CLOSING_SIGNALS = [
-    "have a great day",
-    "have a good day",
-    "have a wonderful day",
-    "take care",
-    "goodbye",
-    "see you soon",
-    "looking forward to seeing you",
-    "if you need anything else",
-    "if you need help in the future",
-    "feel free to reach out",
-    "don't hesitate to contact",
-    "is there anything else i can help",
-    "is there anything else you need",
-]
 
 
 @dataclass
@@ -119,12 +103,25 @@ class ConversationRunner:
             result.transcript.append(TurnRecord(role="patient", content=patient_msg))
             history.append({"role": "user", "content": patient_msg})
 
-            # ── Send to agent API (with empty-reply retry) ────────────────────
-            agent_reply, new_chat_id, api_error = self._call_api_with_retry(
-                message=patient_msg,
-                chat_id=chat_id,
-                conversation_thread=test_case.conversation_thread if turn == 0 else None,
-            )
+            # ── Send to agent API ──────────────────────────────────────────────────
+            # On turn 0 of a follow-up test the agent loads continuity memory and
+            # intentionally returns agent_response: null — it is waiting for the
+            # patient's first real input. Do NOT retry on empty here; just capture
+            # the chat_id and move straight to the next patient turn.
+            is_followup_first_turn = (turn == 0 and test_case.conversation_thread is not None)
+
+            if is_followup_first_turn:
+                agent_reply, new_chat_id, api_error = self._call_api(
+                    message=patient_msg,
+                    chat_id=chat_id,
+                    conversation_thread=test_case.conversation_thread,
+                )
+            else:
+                agent_reply, new_chat_id, api_error = self._call_api_with_retry(
+                    message=patient_msg,
+                    chat_id=chat_id,
+                    conversation_thread=None,
+                )
 
             if api_error:
                 result.error = api_error
@@ -137,17 +134,15 @@ class ConversationRunner:
                 result.chat_id = chat_id
                 logger.info("  Chat ID assigned: %s", chat_id)
 
+            # On the follow-up first turn a null response is expected — skip
+            # transcript logging and proceed immediately to the next patient turn.
+            if is_followup_first_turn and not agent_reply:
+                logger.info("  [Turn 1] AGENT  : (null — expected on follow-up turn 0, proceeding)")
+                continue
+
             logger.info("  [Turn %d] AGENT  : %s", turn + 1, agent_reply)
             result.transcript.append(TurnRecord(role="agent", content=agent_reply))
             history.append({"role": "assistant", "content": agent_reply})
-
-            # ── Check if agent has closed the conversation ────────────────────
-            # Retell marks the chat ended after a farewell message.
-            # Sending another message after this causes HTTP 400 "Chat already ended".
-            if self._agent_has_closed(agent_reply):
-                logger.info("  Agent closed the conversation -- stopping loop.")
-                result.ended_gracefully = True
-                return result
 
             # ── Check if patient signalled end ────────────────────────────────
             if self._patient_wants_to_end(patient_msg):
@@ -198,7 +193,7 @@ class ConversationRunner:
 
     def _call_api_with_retry(
         self,
-        message: str,
+        message: Optional[str],
         chat_id: Optional[str],
         conversation_thread: Optional[list],
         end_conversation: bool = False,
@@ -257,12 +252,18 @@ class ConversationRunner:
         conversation_thread: Optional[list],
         end_conversation: bool = False,
     ) -> tuple[str, Optional[str], Optional[str]]:
-        """Low-level API call. Returns: (agent_reply, chat_id, error_message)."""
+        """Low-level API call. Returns: (agent_reply, chat_id, error_message).
+        When end_conversation=True and message=None, the payload contains no
+        message field — matching the explicit end_conversation payload contract.
+        """
         payload: dict = {
-            "location_id": AGENT_ID,
-            "message": message,
+            "location_id": LOCATION_ID,
+            "organization_id": ORGANIZATION_ID,
+            "conversation_id": CONVERSATION_ID,
             "end_conversation": end_conversation,
         }
+        if message is not None:
+            payload["message"] = message
         if chat_id:
             payload["chat_id"] = chat_id
         if conversation_thread and not chat_id:
@@ -297,7 +298,10 @@ class ConversationRunner:
         return agent_reply, new_chat_id, None
 
     def _end_conversation(self, result: ConversationResult, chat_id: Optional[str]) -> None:
-        """Send a friendly goodbye then fire end_conversation=True."""
+        """Patient says goodbye, then send end_conversation payload to explicitly close the chat.
+        The agent never closes the chat itself, so this must always be called.
+        End payload: location_id + organization_id + chat_id + end_conversation: true (no message field).
+        """
         if not chat_id:
             logger.warning("  No chat_id -- skipping end_conversation call.")
             result.ended_gracefully = False
@@ -317,21 +321,15 @@ class ConversationRunner:
 
         time.sleep(TURN_DELAY_SECONDS)
 
-        # Step 2: end_conversation flag
+        # Step 2: explicitly close the chat -- no message field in this payload
         self._call_api(
-            message="",
+            message=None,
             chat_id=chat_id,
             conversation_thread=None,
             end_conversation=True,
         )
         result.ended_gracefully = True
         logger.info("  Conversation ended cleanly for %s.", result.test_case_id)
-
-    @staticmethod
-    def _agent_has_closed(message: str) -> bool:
-        """Returns True if the agent's message contains a farewell/closing phrase."""
-        lower = message.lower()
-        return any(signal in lower for signal in _AGENT_CLOSING_SIGNALS)
 
     @staticmethod
     def _patient_wants_to_end(message: str) -> bool:

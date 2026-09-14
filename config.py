@@ -7,11 +7,13 @@ All API endpoints, credentials, and test data in one place.
 import os
 
 # ── API ───────────────────────────────────────────────────────────────────────
-# FORWARD_API_URL = "https://betaaiwebsitechatwidget.adit.com/engage/forward-to-agent"
-# AGENT_ID        = "agent_218003e350c39e8dc095fb7534"
-FORWARD_API_URL = "http://localhost:8001/engage/forward-to-agent"
-AGENT_ID        = "agent_261392226ad29fbf09d6fdda3c"
-API_TOKEN       = os.getenv("API_ACCESS_TOKEN",)
+# FORWARD_API_URL   = "https://betaaiwebsitechatwidget.adit.com/engage/forward-to-agent"
+FORWARD_API_URL   = "http://localhost:8000/engage/forward-to-agent"
+LOCATION_ID       = "e235fadd-af83-41bb-90cd-bc17da9293d6"
+ORGANIZATION_ID   = "ed0b5b16-dc50-4600-901e-0eae1fc2b9d2"
+CONVERSATION_ID   = "6c999e6e-5f7a-49cc-a8a0-307a4c17cb0d"  # static ID used for all test conversations
+
+API_TOKEN         = os.getenv("API_ACCESS_TOKEN",)
 
 API_HEADERS = {
     "Content-Type": "application/json",
@@ -32,11 +34,15 @@ PATIENT_NAME  = f"{PATIENT_FIRST} {PATIENT_LAST}"
 
 # ── Available providers ───────────────────────────────────────────────────────
 PROVIDERS = [
-    "Lucas Bennett",
-    "Ethan Brooks",
-    "Clinic2 Provider",
-    "clinic3 provider",
+    "Default Hygienist",
+    "Default Provider",
 ]
+
+# ── Practice rules (used in test personas and evaluator) ──────────────────────
+RESCHEDULING_WINDOW_HOURS = 48      # last-minute rescheduling threshold
+CANCELLATION_WINDOW_HOURS  = 24      # last-minute cancellation threshold
+RESCHEDULING_CHARGE: str   = ""     # e.g. "$50" — leave empty if charges not configured
+CANCELLATION_CHARGE: str   = ""     # e.g. "$75" — leave empty if charges not configured
 
 # ── Runner settings ───────────────────────────────────────────────────────────
 DEFAULT_MAX_TURNS    = 17     # max back-and-forth turns per test case (+5 from original 12)

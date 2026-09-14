@@ -39,7 +39,7 @@ class TestResult:
     evaluation: EvaluationResult
 
 
-_VERDICT_EMOJI = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌"}
+_VERDICT_EMOJI = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌", "API_ERROR": "🔌"}
 _SEVERITY_EMOJI = {"critical": "🔴", "warning": "🟡"}
 
 
@@ -63,12 +63,13 @@ def generate_report(results: list[TestResult], run_label: Optional[str] = None) 
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_report(results: list[TestResult], timestamp: datetime, label: str) -> str:
-    total   = len(results)
-    passed  = sum(1 for r in results if r.evaluation.verdict == "PASS")
-    warned  = sum(1 for r in results if r.evaluation.verdict == "WARN")
-    failed  = sum(1 for r in results if r.evaluation.verdict == "FAIL")
-    pass_rate = round((passed / total) * 100, 1) if total else 0
-    avg_score = round(sum(r.evaluation.score for r in results) / total, 1) if total else 0
+    total      = len(results)
+    passed     = sum(1 for r in results if r.evaluation.verdict == "PASS")
+    warned     = sum(1 for r in results if r.evaluation.verdict == "WARN")
+    failed     = sum(1 for r in results if r.evaluation.verdict == "FAIL")
+    api_errors = sum(1 for r in results if r.evaluation.verdict == "API_ERROR")
+    pass_rate  = round((passed / total) * 100, 1) if total else 0
+    avg_score  = round(sum(r.evaluation.score for r in results) / total, 1) if total else 0
 
     lines: list[str] = []
 
@@ -95,6 +96,7 @@ def _build_report(results: list[TestResult], timestamp: datetime, label: str) ->
         f"| ✅ PASS | {passed} |",
         f"| ⚠️ WARN | {warned} |",
         f"| ❌ FAIL | {failed} |",
+        f"| 🔌 API ERROR | {api_errors} |",
         f"| **Total** | **{total}** |",
         "",
         "---",
@@ -133,6 +135,20 @@ def _build_report(results: list[TestResult], timestamp: datetime, label: str) ->
                 f"- **{r.test_case.id}** — {r.test_case.name}",
                 f"  - Score: {r.evaluation.score}/100",
                 f"  - Summary: {r.evaluation.summary}",
+            ]
+        lines += ["", "---", ""]
+
+    # ── API errors quick-list ───────────────────────────────────────────────────
+    api_error_tests = [r for r in results if r.evaluation.verdict == "API_ERROR"]
+    if api_error_tests:
+        lines += [
+            "## 🔌 API Errors (Quick View)",
+            "",
+        ]
+        for r in api_error_tests:
+            lines += [
+                f"- **{r.test_case.id}** — {r.test_case.name}",
+                f"  - Error: {r.conversation.error or 'unknown'}",
             ]
         lines += ["", "---", ""]
 
