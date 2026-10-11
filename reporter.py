@@ -13,18 +13,20 @@ Report structure:
       - Summary
       - Findings
       - Failed behaviours
+      - Tool Calls (not collapsed — quick-scan summary of every tool call/result)
       - Full transcript (collapsible)
 """
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from evaluator import EvaluationResult
-from runner import ConversationResult
+from runner import ConversationResult, TurnRecord
 from test_cases.cases import TestCase
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,54 @@ class TestResult:
 
 _VERDICT_EMOJI = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌", "API_ERROR": "🔌"}
 _SEVERITY_EMOJI = {"critical": "🔴", "warning": "🟡"}
+
+_CALL_PATTERN = re.compile(r"^CALLED (.+?)\((.*)\)$", re.DOTALL)
+_RESULT_PATTERN = re.compile(r"^RESULT for (.+?) \| successful=(.+?) \| (.*)$", re.DOTALL)
+
+
+def _extract_tool_calls(transcript: list[TurnRecord]) -> list[dict]:
+    """
+    Pair up the flattened "CALLED ..." / "RESULT for ..." TOOL turns (in
+    transcript order) back into structured {tool_name, arguments, successful,
+    result} records for the quick-scan Tool Calls section. Each RESULT is
+    matched to the earliest still-unmatched CALL for the same tool name
+    (tool calls execute in order, so this holds even with several calls to
+    the same tool). A call with no result yet, or a result with no call
+    recorded, is still shown rather than dropped.
+    """
+    pending: dict[str, list[dict]] = {}
+    ordered: list[dict] = []
+
+    for turn in transcript:
+        if turn.role != "tool":
+            continue
+
+        call_match = _CALL_PATTERN.match(turn.content)
+        if call_match:
+            tool_name, arguments = call_match.groups()
+            record = {"tool_name": tool_name, "arguments": arguments, "successful": None, "result": None}
+            pending.setdefault(tool_name, []).append(record)
+            ordered.append(record)
+            continue
+
+        result_match = _RESULT_PATTERN.match(turn.content)
+        if result_match:
+            tool_name, successful, result_content = result_match.groups()
+            queue = pending.get(tool_name)
+            if queue:
+                record = queue.pop(0)
+                record["successful"] = successful
+                record["result"] = result_content
+            else:
+                # Result with no matching call recorded earlier in the transcript.
+                ordered.append({
+                    "tool_name": tool_name,
+                    "arguments": None,
+                    "successful": successful,
+                    "result": result_content,
+                })
+
+    return ordered
 
 
 def generate_report(results: list[TestResult], run_label: Optional[str] = None) -> Path:
@@ -173,6 +223,7 @@ def _build_report(results: list[TestResult], timestamp: datetime, label: str) ->
             f"| **Chat ID** | `{conv.chat_id or 'n/a'}` |",
             f"| **Ended Gracefully** | {'Yes' if conv.ended_gracefully else 'No'} |",
             f"| **Turns** | {len([t for t in conv.transcript if t.role == 'patient'])} patient turns |",
+            f"| **Tool Calls Visible** | {'Yes' if any(t.role == 'tool' for t in conv.transcript) else 'No'} |",
             "",
         ]
 
@@ -208,6 +259,26 @@ def _build_report(results: list[TestResult], timestamp: datetime, label: str) ->
             lines.append(f"- {mark} {eb}")
         lines.append("")
 
+        # Tool Calls (not collapsed — quick-scan summary, in the order they happened)
+        tool_calls = _extract_tool_calls(conv.transcript)
+        lines += ["**🔧 Tool Calls:**", ""]
+        if tool_calls:
+            for call in tool_calls:
+                if call["successful"] is None:
+                    status = "⏳ no result recorded"
+                elif call["successful"].strip().lower() == "true":
+                    status = "✅ successful"
+                else:
+                    status = "❌ failed"
+                lines.append(f"- `{call['tool_name']}({call['arguments'] or '?'})` — {status}")
+                if call["result"] is not None:
+                    lines.append(f"  - Result: {call['result']}")
+                elif call["arguments"] is None:
+                    lines.append("  - (no matching call recorded)")
+        else:
+            lines.append("*No tool calls visible for this test — enrichment may have failed for this run.*")
+        lines.append("")
+
         # Conversation thread (if any)
         if tc.conversation_thread:
             import json as _json
@@ -231,7 +302,12 @@ def _build_report(results: list[TestResult], timestamp: datetime, label: str) ->
             "```",
         ]
         for turn in conv.transcript:
-            label = "PATIENT" if turn.role == "patient" else "AGENT  "
+            if turn.role == "patient":
+                label = "PATIENT"
+            elif turn.role == "tool":
+                label = "TOOL   "
+            else:
+                label = "AGENT  "
             lines.append(f"{label}: {turn.content}")
         lines += [
             "```",

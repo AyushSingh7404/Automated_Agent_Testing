@@ -11,9 +11,10 @@ Agent_testing/
 ├── runner.py             # Drives conversations via the forward-to-agent API
 ├── evaluator.py          # LLM judge — evaluates transcripts
 ├── reporter.py           # Generates Markdown reports
+├── paste_mode.py         # Evaluate a pasted/fetched transcript directly, skipping the live runner
 ├── pyproject.toml
 ├── test_cases/
-│   └── cases.py          # All 45 test case definitions
+│   └── cases.py          # All 58 test case definitions
 └── reports/              # Generated Markdown reports (auto-created)
 ```
 
@@ -48,6 +49,14 @@ python run_tests.py --label "sprint_3_regression"
 
 # List all test cases without running
 python run_tests.py --dry-run
+
+# Paste mode — evaluate an already-completed transcript against a test case's
+# expected_behaviors checklist, skipping the live GPT-simulated conversation.
+# Accepts a JSON array of {role, content} (exactly what
+# GET /engage/chat-transcript/{chat_id} returns, wrapper included) or
+# PATIENT:/AGENT: labeled plain text.
+python run_tests.py --paste transcript.json --test-id TC_031
+python run_tests.py --paste - --test-id TC_001   # read from stdin
 ```
 
 ## Test Case IDs
@@ -72,7 +81,7 @@ python run_tests.py --dry-run
 | TC_016 | Appointment ID Hallucination — Rescheduling Slot | critical |
 | TC_017 | Patient ID Hallucination — Book Appointment | critical |
 | TC_018 | Slot and Time Hallucination — Book Appointment | critical |
-| TC_019 | Slot and Time Hallucination — Modify Appointment | critical |
+| TC_019 | Slot and Time Hallucination — Modify Appointment (Rescheduling) | critical |
 | TC_020 | Provider ID Hallucination — Get Available Slot | critical |
 | TC_021 | Provider ID Hallucination — Book Appointment | critical |
 | TC_022 | Hallucination Check — Modify Appointment Tool Call | critical |
@@ -99,6 +108,19 @@ python run_tests.py --dry-run
 | TC_043 | Incomplete Chat — Cancellation | warning |
 | TC_044 | Incomplete Chat — Rescheduling | warning |
 | TC_045 | Incomplete Chat — Confirmation | warning |
+| TC_046 | Fresh Start Existing Patient Booking With Specific Provider | critical |
+| TC_047 | Emergency Case — Single Patient Appointment Request | critical |
+| TC_048 | Emergency Case — Multi Patient Appointment Request | critical |
+| TC_049 | Multi Patient Booking — Patients Request to Be Seen Together | critical |
+| TC_050 | Multi Patient Booking — Patients Request to Be Seen Separately | critical |
+| TC_051 | Multipatient — Phone Number Never Assumed Shared | critical |
+| TC_052 | Reason for Visit Asked for Every Patient — Never Defaulted | critical |
+| TC_053 | No Re-Asking Details Already Given in the Same Conversation | warning |
+| TC_054 | Multi Patient Booking — Same Time Slot, Two Different Services, Booked Simultaneously | critical |
+| TC_055 | Insurance Acceptance Flow (I1) — Recommends Booking After Task Created | warning |
+| TC_056 | Multipatient — Patient Type Never Volunteered, Agent Must Still Ask | critical |
+| TC_057 | Cross-Patient-Type Service Substitution Is Silent, Never Announced | warning |
+| TC_058 | Multi-Patient New-Patient Registration — No Field Combined or Silently Omitted | critical |
 
 ## Report Format
 

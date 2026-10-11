@@ -18,6 +18,14 @@ Usage:
 
     # Dry run — list test cases without running
     python run_tests.py --dry-run
+
+    # Paste mode — evaluate an already-completed transcript against a test
+    # case's expected_behaviors checklist, skipping the live GPT-simulated
+    # conversation entirely. Accepts a JSON array of {role, content} (exactly
+    # what GET /engage/chat-transcript/{chat_id} returns) or PATIENT:/AGENT:
+    # labeled plain text.
+    python run_tests.py --paste transcript.json --test-id TC_001
+    python run_tests.py --paste - --test-id TC_031   # read from stdin
 """
 from __future__ import annotations
 
@@ -29,6 +37,7 @@ from pathlib import Path
 
 from config import OPENAI_API_KEY
 from evaluator import Evaluator
+from paste_mode import run_paste_mode
 from reporter import TestResult, generate_report
 from runner import ConversationRunner
 from test_cases.cases import ALL_TEST_CASES, TestCase
@@ -70,7 +79,32 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="List all test cases that would run without executing them",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--paste",
+        metavar="FILE",
+        help="Path to a pasted transcript file to evaluate directly (skips the live runner). "
+             "Pass '-' to read the transcript from stdin. Requires --test-id.",
+    )
+    parser.add_argument(
+        "--test-id",
+        metavar="ID",
+        help="Test case ID whose expected_behaviors checklist the pasted transcript is evaluated against. "
+             "Required when using --paste.",
+    )
+    parser.add_argument(
+        "--chat-id",
+        metavar="CHAT_ID",
+        default=None,
+        help="Optional chat_id to record in the report for a pasted transcript.",
+    )
+    args = parser.parse_args()
+
+    if args.paste and not args.test_id:
+        parser.error("--paste requires --test-id")
+    if args.test_id and not args.paste:
+        parser.error("--test-id has no effect without --paste")
+
+    return args
 
 
 def _select_cases(args: argparse.Namespace) -> list[TestCase]:
@@ -96,6 +130,20 @@ def main() -> None:
     if not OPENAI_API_KEY:
         logger.error("OPENAI_API_KEY is not set. Export it before running tests.")
         sys.exit(1)
+
+    # ── Paste mode — evaluate a pre-existing transcript, skip the live runner ──
+    if args.paste:
+        try:
+            run_paste_mode(
+                test_id=args.test_id,
+                transcript_source=args.paste,
+                chat_id=args.chat_id,
+                run_label=args.label,
+            )
+        except (ValueError, FileNotFoundError) as exc:
+            logger.error("Paste mode failed: %s", exc)
+            sys.exit(1)
+        return
 
     selected = _select_cases(args)
 

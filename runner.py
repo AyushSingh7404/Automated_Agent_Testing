@@ -16,6 +16,7 @@ Flow per test case:
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -26,6 +27,8 @@ from langchain_openai import ChatOpenAI
 
 from config import (
     API_HEADERS,
+    CHAT_TRANSCRIPT_FETCH_DELAY,
+    CHAT_TRANSCRIPT_FETCH_RETRIES,
     CONVERSATION_ID,
     EMPTY_REPLY_RETRIES,
     EMPTY_REPLY_WAIT,
@@ -34,9 +37,12 @@ from config import (
     OPENAI_API_KEY,
     ORGANIZATION_ID,
     PATIENT_MODEL,
+    RETELL_API_KEY,
+    RETELL_GET_CHAT_URL,
     REQUEST_TIMEOUT,
     TURN_DELAY_SECONDS,
 )
+from retell_transcript import retell_items_to_turns
 from test_cases.cases import TestCase
 
 logger = logging.getLogger(__name__)
@@ -47,11 +53,59 @@ _END_SIGNALS = {
     "thank you, bye", "thanks, bye", "that's it", "that is it",
 }
 
+# ── Generic stall detector (case-agnostic safety net) ──────────────────────────
+# If the agent's recent turns keep circling the same topic, the simulated
+# patient is likely stuck giving non-committal answers instead of resolving
+# whatever is being asked. Word-overlap similarity on the agent's own messages
+# is used rather than any topic-specific keyword list, so this applies to any
+# future test case with a similar loop -- not just TC_011-014, which already
+# have explicit deterministic personas of their own.
+_STALL_WINDOW = 5              # look at the last this many agent turns
+_STALL_MIN_REPEATS = 3         # need at least this many highly-similar agent turns
+_STALL_SIMILARITY_THRESHOLD = 0.45
+_STALLWORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "to", "of", "in",
+    "on", "for", "and", "or", "but", "with", "you", "your", "i", "me", "my",
+    "please", "can", "could", "would", "do", "does", "did", "it", "that", "this",
+    "have", "has", "had", "will", "we", "us", "our", "so", "if", "not", "no",
+}
+
+
+def _tokenize(text: str) -> set[str]:
+    words = re.findall(r"[a-zA-Z']+", text.lower())
+    return {w for w in words if w not in _STALLWORDS and len(w) > 2}
+
+
+def _message_similarity(a: str, b: str) -> float:
+    """Jaccard word overlap between two messages, ignoring common stopwords."""
+    ta, tb = _tokenize(a), _tokenize(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _detect_agent_stall(history: list[dict]) -> bool:
+    """
+    True when the agent's most recent message closely resembles enough of its
+    other recent messages to suggest it's re-asking about the same thing
+    without the conversation moving on.
+    """
+    agent_msgs = [h["content"] for h in history if h.get("role") == "assistant"]
+    recent = agent_msgs[-_STALL_WINDOW:]
+    if len(recent) < _STALL_MIN_REPEATS:
+        return False
+
+    latest = recent[-1]
+    similar_count = sum(
+        1 for prior in recent[:-1]
+        if _message_similarity(latest, prior) >= _STALL_SIMILARITY_THRESHOLD
+    )
+    return similar_count >= (_STALL_MIN_REPEATS - 1)
 
 
 @dataclass
 class TurnRecord:
-    role: str    # "patient" | "agent"
+    role: str    # "patient" | "agent" | "tool" (tool calls/results — paste-mode transcripts only)
     content: str
 
 
@@ -63,12 +117,18 @@ class ConversationResult:
     ended_gracefully: bool = False
     error: Optional[str] = None
     infra_error: bool = False  # True when an API timeout/connection error cut the conversation short
+    tool_calls_included: bool = False  # True when the transcript was enriched with real tool call data
 
     def to_text(self) -> str:
         """Plain text transcript for the evaluator."""
         lines = []
         for t in self.transcript:
-            label = "PATIENT" if t.role == "patient" else "AGENT  "
+            if t.role == "patient":
+                label = "PATIENT"
+            elif t.role == "tool":
+                label = "TOOL   "
+            else:
+                label = "AGENT  "
             lines.append(f"{label}: {t.content}")
         return "\n".join(lines)
 
@@ -79,6 +139,8 @@ class ConversationRunner:
             model=PATIENT_MODEL,
             api_key=OPENAI_API_KEY,
             temperature=0.7,
+            timeout=REQUEST_TIMEOUT,   # without this, a stalled OpenAI call can hang for minutes with no error
+            max_retries=2,
         )
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -153,6 +215,17 @@ class ConversationRunner:
 
         # ── Graceful goodbye + end_conversation flag ──────────────────────────
         self._end_conversation(result, chat_id)
+
+        # ── Enrich with the real chat transcript (tool calls included) ────────
+        # Best-effort: if this fails or looks incomplete, keep the transcript
+        # already built from the live API responses above.
+        if chat_id:
+            enriched = self._fetch_enriched_transcript(chat_id, local_turn_count=len(result.transcript))
+            if enriched is not None:
+                result.transcript = enriched
+                result.tool_calls_included = True
+                logger.info("  Transcript enriched with real tool-call data (%d turns).", len(enriched))
+
         return result
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -175,6 +248,19 @@ class ConversationRunner:
             "If you feel the conversation goal has been achieved or you want to end, "
             "say 'bye' or 'that is all, thank you'."
         )
+
+        # Generic fallback for any test case (not just TC_011-014, which already
+        # have their own deterministic personas): if the agent's recent turns
+        # keep circling the same topic, nudge the persona to stop stalling
+        # instead of letting the conversation loop until max_turns is exhausted.
+        if turn > 0 and _detect_agent_stall(history):
+            system_prompt += (
+                "\n\nIMPORTANT: The agent has asked about the same thing several times in a row "
+                "without getting a resolving answer from you. Stop giving non-committal or vague "
+                "responses on this topic now -- either (a) commit to one concrete, plausible answer "
+                "and stay consistent with it, or (b) explicitly ask the agent to note this for the "
+                "team / escalate it -- whichever better fits your persona instructions above."
+            )
 
         messages = [SystemMessage(content=system_prompt)]
         for h in history:
@@ -330,6 +416,106 @@ class ConversationRunner:
         )
         result.ended_gracefully = True
         logger.info("  Conversation ended cleanly for %s.", result.test_case_id)
+
+    def _fetch_enriched_transcript(
+        self,
+        chat_id: str,
+        local_turn_count: int,
+    ) -> Optional[list[TurnRecord]]:
+        """
+        Best-effort fetch of the real chat transcript (tool calls included)
+        straight from Retell's own GET /get-chat/{chat_id} — our own backend's
+        /engage/chat-transcript deliberately strips tool-call entries, so it is
+        not used here.
+
+        Retell's post-chat pipeline (it also generates chat_analysis server-side)
+        can take a while to finish attaching message_with_tool_calls after the
+        chat ends -- a single fixed wait isn't reliable, so this retries up to
+        CHAT_TRANSCRIPT_FETCH_RETRIES times, sleeping CHAT_TRANSCRIPT_FETCH_DELAY
+        between attempts, before giving up.
+
+        Returns None (keep the locally-built transcript) if every attempt fails
+        outright, or if the data still isn't ready after all retries. Returns
+        immediately without retrying on a definitive failure (401/403/404) --
+        those won't fix themselves by waiting.
+        """
+        last_reason = "unknown"
+
+        for attempt in range(1, CHAT_TRANSCRIPT_FETCH_RETRIES + 1):
+            time.sleep(CHAT_TRANSCRIPT_FETCH_DELAY)
+
+            try:
+                resp = requests.get(
+                    f"{RETELL_GET_CHAT_URL}/{chat_id}",
+                    headers={"Authorization": f"Bearer {RETELL_API_KEY}"},
+                    timeout=REQUEST_TIMEOUT,
+                )
+            except Exception as exc:
+                last_reason = f"request error: {exc}"
+                logger.warning(
+                    "  [attempt %d/%d] Could not fetch enriched transcript for %s: %s",
+                    attempt, CHAT_TRANSCRIPT_FETCH_RETRIES, chat_id, exc,
+                )
+                continue
+
+            # Retell returns the chat object directly (no {status, data} envelope).
+            if resp.status_code in (401, 403, 404):
+                # Not a timing issue -- auth or a genuinely missing chat_id won't
+                # resolve itself by waiting, so stop retrying immediately.
+                logger.warning(
+                    "  Retell get-chat returned HTTP %d for %s (auth/not-found) -- "
+                    "giving up, keeping locally-built transcript.",
+                    resp.status_code, chat_id,
+                )
+                return None
+
+            if resp.status_code != 200:
+                last_reason = f"HTTP {resp.status_code}"
+                logger.warning(
+                    "  [attempt %d/%d] Retell get-chat fetch returned HTTP %d for %s -- retrying.",
+                    attempt, CHAT_TRANSCRIPT_FETCH_RETRIES, resp.status_code, chat_id,
+                )
+                continue
+
+            try:
+                data = resp.json()
+            except Exception:
+                last_reason = "invalid JSON"
+                logger.warning(
+                    "  [attempt %d/%d] Retell get-chat response was not valid JSON for %s -- retrying.",
+                    attempt, CHAT_TRANSCRIPT_FETCH_RETRIES, chat_id,
+                )
+                continue
+
+            items = data.get("message_with_tool_calls", [])
+            if not items:
+                last_reason = "no messages yet"
+                logger.info(
+                    "  [attempt %d/%d] Retell get-chat has no messages yet for %s "
+                    "(still finalizing post-chat processing) -- retrying.",
+                    attempt, CHAT_TRANSCRIPT_FETCH_RETRIES, chat_id,
+                )
+                continue
+
+            turns = [TurnRecord(role=t["role"], content=t["content"]) for t in retell_items_to_turns(items)]
+
+            if len(turns) < local_turn_count:
+                last_reason = f"only {len(turns)} turns (expected >= {local_turn_count})"
+                logger.info(
+                    "  [attempt %d/%d] Retell get-chat for %s returned fewer turns (%d) than "
+                    "locally recorded (%d) -- likely still finalizing, retrying.",
+                    attempt, CHAT_TRANSCRIPT_FETCH_RETRIES, chat_id, len(turns), local_turn_count,
+                )
+                continue
+
+            return turns
+
+        logger.warning(
+            "  Gave up fetching enriched transcript for %s after %d attempts (last reason: %s) -- "
+            "keeping locally-built transcript.",
+            chat_id, CHAT_TRANSCRIPT_FETCH_RETRIES, last_reason,
+        )
+        return None
 
     @staticmethod
     def _patient_wants_to_end(message: str) -> bool:
